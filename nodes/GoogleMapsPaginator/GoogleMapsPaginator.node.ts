@@ -150,10 +150,6 @@ function parseResponse(text: string, includeRaw: boolean): Place[] {
 	}
 }
 
-function buildProxyAuthHeader(proxy: ProxyConfig, sessionId: string): string {
-	const proxyPassword = `${proxy.password}_country-${proxy.country}_session-${sessionId}`;
-	return `Basic ${Buffer.from(`${proxy.username}:${proxyPassword}`).toString('base64')}`;
-}
 
 // ============================================================
 // CORE FETCH - critical: fresh agents per call, no shared state
