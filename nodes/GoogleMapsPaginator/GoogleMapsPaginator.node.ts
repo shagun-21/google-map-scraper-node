@@ -164,14 +164,13 @@ async function fetchPage(
 	sessionId: string,
 	timeoutMs: number,
 ): Promise<{ text: string; status: number; size: number }> {
-	// CRITICAL: create fresh agents inside this function on every call.
-	// This prevents TCP socket reuse across parallel executions, which would
-	// cause Evomi/Google to see correlated traffic and trigger anti-abuse.
 	const httpAgent = new http.Agent({ keepAlive: false });
 	const httpsAgent = new https.Agent({ keepAlive: false });
 
-	const proxyAuthHeader = buildProxyAuthHeader(proxy, sessionId);
 	const ua = pickUserAgent();
+
+	// Build the full Evomi password including country and session routing
+	const proxyPassword = `${proxy.password}_country-${proxy.country}_session-${sessionId}`;
 
 	const res: AxiosResponse = await axios.get(url, {
 		headers: {
@@ -180,12 +179,15 @@ async function fetchPage(
 			'accept-language': 'en-US,en;q=0.9',
 			referer: 'https://www.google.com/maps/',
 			cookie: COOKIES,
-			'Proxy-Authorization': proxyAuthHeader,
 		},
 		proxy: {
 			protocol: 'http',
 			host: proxy.host,
 			port: proxy.port,
+			auth: {
+				username: proxy.username,
+				password: proxyPassword,
+			},
 		},
 		httpAgent,
 		httpsAgent,
