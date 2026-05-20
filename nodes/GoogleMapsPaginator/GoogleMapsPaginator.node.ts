@@ -371,7 +371,7 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 		rating:             dig(r, 4, 7),
 		review_count:       dig(r, 37, 1),
 		reviews_per_score:  extractReviewsPerScore(r),
-		reviews_link:       buildReviewsLink(placeId),
+
 
 		// ── Pricing ────────────────────────────────────────────
 		price_level: dig(r, 4, 2),
