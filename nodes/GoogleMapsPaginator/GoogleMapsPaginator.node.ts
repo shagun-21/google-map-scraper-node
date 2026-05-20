@@ -56,32 +56,64 @@ interface Place {
 	phone: string | null;
 	place_id_cid: string | null;
 
-	// Extras (from FIELD_EXTRACTORS in parser.ts)
+	// Identity extras
+	kgmid: string | null;
+	cid: string | null;
+
+	// Address decomposition
+	street: string | null;
+	city: string | null;
+	state: string | null;
+	postal_code: string | null;
+	country_code: string | null;
+	plus_code: string | null;
+	timezone: string | null;
+
+	// Pricing
 	price_level: any;
 	price_range: any;
+
+	// Images
 	thumbnail: any;
 	photo_count: any;
+	main_image_url: string | null;
+	logo: string | null;
+	street_view: string | null;
+
+	// Hours
 	hours: Array<{ day: string; hours: string }> | null;
-	open_status: any;
+	hours_csv: string | null;
+	open_status: string | null;
+
+	// Status
 	permanently_closed: boolean;
 	temporarily_closed: boolean;
+	business_status: string;
+
+	// Owner
 	claimed: boolean;
-	plus_code: any;
-	state: any;
-	city: any;
-	postal_code: any;
-	country_code: any;
-	timezone: any;
-	maps_url: any;
-	description: any;
+	owner_id: string | null;
+	owner_title: string | null;
+
+	// Links
+	location_link: string | null;
+	reviews_link: string | null;
+	maps_url: string | null;
 	menu_link: any;
 	booking_link: any;
 	booking_platforms: Array<{ name: string; url: string }> | null;
-	service_options: any;
+	order_links: Array<{ name: string; url: string }> | null;
+
+	// Reviews
+	reviews_per_score: Record<string, number> | null;
+
+	// Rich attributes
+	about: Record<string, Record<string, boolean>> | null;
+	description: string | null;
+	badges: string[];
+	local_name: string | null;
 	questions_answers: any;
 	owner_response: any;
-	main_image_url: any;
-	local_name: any;
 
 	raw_record?: any;
 }
@@ -144,22 +176,85 @@ function extractFullAddress(r: any): string | null {
 }
 
 // ============================================================
-// HELPERS — hours, booking platforms
+// HELPERS
 // ============================================================
+
+// Phone — r[178] is more reliable than regex
+function extractPhoneStructured(r: any): string | null {
+	// r[178][1][0][1] = "+91 98343 92140" international format
+	const intl = dig(r, 178, 1, 0, 1);
+	if (intl && typeof intl === 'string') return intl.trim();
+	// fallback regex
+	return extractPhone(r);
+}
+
+// Hours — r[203] array, each entry is one day
+// entry[0][0] = day name, entry[3][0][0] = hours string
 function extractHours(r: any): Array<{ day: string; hours: string }> | null {
 	const raw = dig(r, 203);
 	if (!Array.isArray(raw)) return null;
+	const seen = new Set<string>();
 	const out: Array<{ day: string; hours: string }> = [];
 	for (const entry of raw) {
-		const day = dig(entry, 0, 0);
+		const day   = dig(entry, 0, 0);
 		const hours = dig(entry, 3, 0, 0);
-		if (day && hours) out.push({ day, hours });
+		if (day && hours && !seen.has(day)) {
+			seen.add(day);
+			out.push({ day, hours });
+		}
 	}
 	return out.length > 0 ? out : null;
 }
 
+// About/attributes — r[100][1]
+// section[0] = internal key, section[1] = display name, section[2] = attrs
+// attr[0] = internal path, attr[1] = display name, attr[2][0] = 1 if true
+function extractAbout(r: any): Record<string, Record<string, boolean>> | null {
+	const sections: any[] = dig(r, 100, 1) ?? [];
+	if (!Array.isArray(sections) || sections.length === 0) return null;
+	const out: Record<string, Record<string, boolean>> = {};
+	for (const section of sections) {
+		const sectionName: string = section?.[1];
+		const attrs: any[] = section?.[2];
+		if (!sectionName || !Array.isArray(attrs)) continue;
+		out[sectionName] = {};
+		for (const attr of attrs) {
+			const attrName: string = attr?.[1];
+			const attrVal: boolean = attr?.[2]?.[0] === 1;
+			if (attrName) out[sectionName][attrName] = attrVal;
+		}
+	}
+	return Object.keys(out).length > 0 ? out : null;
+}
+
+// Badges — r[196][1]: LGBTQ+ friendly, women-owned, etc.
+function extractBadges(r: any): string[] {
+	const items: any[] = dig(r, 196, 1) ?? [];
+	if (!Array.isArray(items)) return [];
+	const out: string[] = [];
+	for (const item of items) {
+		const label = dig(item, 1, 0);
+		if (label && typeof label === 'string') out.push(label);
+	}
+	return out;
+}
+
+// Order links — r[46]: Swiggy, Zomato, District etc.
+function extractOrderLinks(r: any): Array<{ name: string; url: string }> | null {
+	const raw: any[] = dig(r, 46) ?? [];
+	if (!Array.isArray(raw)) return null;
+	const out: Array<{ name: string; url: string }> = [];
+	for (const item of raw) {
+		const url  = dig(item, 0);
+		const name = dig(item, 1);
+		if (url && name) out.push({ name, url });
+	}
+	return out.length > 0 ? out : null;
+}
+
+// Booking platforms — r[75][0][0]
 function extractBookingPlatforms(r: any): Array<{ name: string; url: string }> | null {
-	const raw = dig(r, 75, 0, 0);
+	const raw: any[] = dig(r, 75, 0, 0) ?? [];
 	if (!Array.isArray(raw)) return null;
 	const out: Array<{ name: string; url: string }> = [];
 	for (const platform of raw) {
@@ -170,55 +265,160 @@ function extractBookingPlatforms(r: any): Array<{ name: string; url: string }> |
 	return out.length > 0 ? out : null;
 }
 
+// Owner info — r[57]
+function extractOwner(r: any): { id: string | null; title: string | null } {
+	return {
+		id:    dig(r, 57, 8) ?? dig(r, 57, 2),
+		title: dig(r, 57, 1),
+	};
+}
+
+// Address decomposition — r[183][3][1]
+function extractAddressComponents(r: any): {
+	street: string | null;
+	city: string | null;
+	state: string | null;
+	postal_code: string | null;
+	country_code: string | null;
+} {
+	const comp = dig(r, 183, 3, 1);
+	return {
+		street:       Array.isArray(comp) ? (comp[1] ?? null) : null,
+		city:         Array.isArray(comp) ? (comp[3] ?? null) : null,
+		state:        Array.isArray(comp) ? (comp[5] ?? null) : null,
+		postal_code:  Array.isArray(comp) ? (comp[4] ?? null) : null,
+		country_code: Array.isArray(comp) ? (comp[6] ?? null) : null,
+	};
+}
+
+// Location link
+function buildLocationLink(name: string | null, fid: string | null): string | null {
+	if (!name || !fid) return null;
+	return `https://www.google.com/maps/place/${encodeURIComponent(name)}/@0,0,14z/data=!4m5!3m4!1s${fid}!8m2!3d0!4d0`;
+}
+
+// Reviews link
+function buildReviewsLink(placeId: string | null): string | null {
+	if (!placeId) return null;
+	return `https://search.google.com/local/reviews?placeid=${placeId}&authuser=0&hl=en&gl=IN`;
+}
+
+// Reviews per score — r[88][4] has score buckets (5,4,3,2,1 order)
+function extractReviewsPerScore(r: any): Record<string, number> | null {
+	const bucket = dig(r, 88, 4);
+	if (Array.isArray(bucket) && bucket.length >= 5) {
+		return {
+			'5': bucket[0] ?? 0,
+			'4': bucket[1] ?? 0,
+			'3': bucket[2] ?? 0,
+			'2': bucket[3] ?? 0,
+			'1': bucket[4] ?? 0,
+		};
+	}
+	return null;
+}
+
 // ============================================================
-// RECORD PARSER — indices verified against actual raw record
+// RECORD PARSER — all fields from verified raw record
 // ============================================================
 function parseRecord(r: any, includeRaw: boolean): Place {
+	const fid      = dig(r, 10);
+	const name     = dig(r, 11);
+	const placeId  = extractPlaceId(r);
+	const owner    = extractOwner(r);
+	const addr     = extractAddressComponents(r);
+	const hoursArr = extractHours(r);
+	const hoursCsv = hoursArr
+		? hoursArr.map(h => `${h.day},${h.hours}`).join('|')
+		: null;
+
 	const place: Place = {
-		// Typed core fields
-		fid:            dig(r, 10),
-		name:           dig(r, 11),
-		full_address:   extractFullAddress(r),
-		locality:       dig(r, 14),
-		latitude:       dig(r, 9, 2),
-		longitude:      dig(r, 9, 3),
-		rating:         dig(r, 4, 7),
-		review_count:   dig(r, 37, 1),
-		categories:     dig(r, 13),
+		// ── Core identity ──────────────────────────────────────
+		fid,
+		name,
+		place_id_cid:   placeId,                    // ChIJ...
+		kgmid:          dig(r, 89),                 // /g/11xxx
+		cid:            dig(r, 227, 5) ?? dig(r, 227, 6), // numeric CID
+
+		// ── Contact ────────────────────────────────────────────
+		phone:          extractPhoneStructured(r),
 		website:        dig(r, 7, 0),
 		website_domain: dig(r, 7, 1),
-		phone:          extractPhone(r),
-		place_id_cid:   extractPlaceId(r),
 
-		// Extras — paths verified against actual raw record
-		price_level:        dig(r, 4, 2),
-		price_range:        dig(r, 4, 10),
-		thumbnail:          dig(r, 37, 0),
-		photo_count:        dig(r, 37, 8),
-		// Hours: r[203][0][3][0][0] = hours string, r[203][0][0][0] = day name
-		hours:              extractHours(r),
-		open_status:        dig(r, 203, 0, 4, 0),   // "Open · Closes 11:30 pm"
-		permanently_closed: dig(r, 88, 0) === 2,     // 2 = permanently closed
-		temporarily_closed: dig(r, 88, 0) === 1,     // 1 = temporarily closed
-		// claimed: owner name present at r[57][1] indicates claimed listing
-		claimed:            dig(r, 57, 1) != null,
-		plus_code:          dig(r, 183, 0, 0, 0),   // first address component
-		state:              dig(r, 183, 3, 1, 4),   // Maharashtra
-		city:               dig(r, 183, 3, 1, 3),   // Nagpur
-		postal_code:        dig(r, 183, 3, 1, 4) != null ? dig(r, 183, 3, 1, 4) : null,
-		country_code:       dig(r, 243),             // "IN"
-		timezone:           dig(r, 30),
-		maps_url:           dig(r, 75, 0, 5, 2, 0), // Google Maps reserve URL (long form)
-		description:        dig(r, 25, 15, 0, 2),
-		menu_link:          dig(r, 38, 0),
-		booking_link:       dig(r, 75, 0, 0, 2, 0), // first booking platform URL
-		// Booking platforms array: Swiggy/Zomato/District etc.
-		booking_platforms:  extractBookingPlatforms(r),
-		service_options:    dig(r, 100, 1),
-		questions_answers:  dig(r, 142),
-		owner_response:     dig(r, 144),
-		main_image_url:     dig(r, 72, 0, 0, 6, 0),
-		local_name:         dig(r, 101),             // local language name e.g. Hindi
+		// ── Location ───────────────────────────────────────────
+		latitude:       dig(r, 9, 2),
+		longitude:      dig(r, 9, 3),
+		full_address:   extractFullAddress(r),
+		locality:       dig(r, 14),
+		street:         addr.street,
+		city:           addr.city,
+		state:          addr.state,
+		postal_code:    addr.postal_code,
+		country_code:   addr.country_code ?? dig(r, 243),
+		plus_code:      dig(r, 183, 0, 0, 0),
+		timezone:       dig(r, 30),
+
+		// ── Categories ─────────────────────────────────────────
+		categories:     dig(r, 13),
+
+		// ── Ratings ────────────────────────────────────────────
+		rating:             dig(r, 4, 7),
+		review_count:       dig(r, 37, 1),
+		reviews_per_score:  extractReviewsPerScore(r),
+		reviews_link:       buildReviewsLink(placeId),
+
+		// ── Pricing ────────────────────────────────────────────
+		price_level: dig(r, 4, 2),
+		price_range: dig(r, 4, 10),
+
+		// ── Images ─────────────────────────────────────────────
+		main_image_url: dig(r, 72, 0, 0, 6, 0),
+		thumbnail:      dig(r, 37, 0),
+		photo_count:    dig(r, 37, 8),
+		logo:           dig(r, 157),
+		street_view:    dig(r, 72, 0, 0, 6, 0),
+
+		// ── Hours ──────────────────────────────────────────────
+		hours:       hoursArr,
+		hours_csv:   hoursCsv,
+		open_status: dig(r, 203, 0, 4, 0),         // "Open · Closes 11:30 pm"
+
+		// ── Status ─────────────────────────────────────────────
+		permanently_closed: dig(r, 88, 0) === 2,
+		temporarily_closed: dig(r, 88, 0) === 1,
+		business_status:    dig(r, 88, 0) === 2 ? 'PERMANENTLY_CLOSED'
+		                  : dig(r, 88, 0) === 1 ? 'TEMPORARILY_CLOSED'
+		                  : 'OPERATIONAL',
+
+		// ── Owner / claimed ────────────────────────────────────
+		claimed:     owner.title != null,
+		owner_id:    owner.id,
+		owner_title: owner.title,
+
+		// ── Links ──────────────────────────────────────────────
+		location_link:     buildLocationLink(name, fid),
+		menu_link:         dig(r, 38, 0),
+		booking_link:      dig(r, 75, 0, 0, 2, 0), // first booking URL
+		booking_platforms: extractBookingPlatforms(r),
+		order_links:       extractOrderLinks(r),    // Swiggy/Zomato order URLs
+
+		// ── Rich attributes ────────────────────────────────────
+		// Includes: Service options, Dining options, Amenities,
+		// Payments, Atmosphere, Highlights, Accessibility, etc.
+		about:          extractAbout(r),
+		description:    dig(r, 25, 15, 0, 2),
+
+		// ── Business identity badges ───────────────────────────
+		// e.g. "LGBTQ+ friendly", "Identifies as women-owned"
+		badges:         extractBadges(r),
+
+		// ── Local language name ────────────────────────────────
+		local_name:     dig(r, 101),
+
+		// ── Misc ───────────────────────────────────────────────
+		questions_answers: dig(r, 142),
+		owner_response:    dig(r, 144),
+		maps_url:          null,
 	};
 
 	if (includeRaw) place.raw_record = r;
