@@ -61,23 +61,27 @@ interface Place {
 	price_range: any;
 	thumbnail: any;
 	photo_count: any;
-	hours: any;
+	hours: Array<{ day: string; hours: string }> | null;
 	open_status: any;
-	permanently_closed: any;
-	claimed: any;
+	permanently_closed: boolean;
+	temporarily_closed: boolean;
+	claimed: boolean;
 	plus_code: any;
+	state: any;
+	city: any;
+	postal_code: any;
+	country_code: any;
 	timezone: any;
 	maps_url: any;
-	place_url: any;
 	description: any;
 	menu_link: any;
-	reservation_links: any;
 	booking_link: any;
+	booking_platforms: Array<{ name: string; url: string }> | null;
 	service_options: any;
-	amenities: any;
 	questions_answers: any;
 	owner_response: any;
 	main_image_url: any;
+	local_name: any;
 
 	raw_record?: any;
 }
@@ -140,7 +144,34 @@ function extractFullAddress(r: any): string | null {
 }
 
 // ============================================================
-// RECORD PARSER — indices from parser.ts FIELD_EXTRACTORS
+// HELPERS — hours, booking platforms
+// ============================================================
+function extractHours(r: any): Array<{ day: string; hours: string }> | null {
+	const raw = dig(r, 203);
+	if (!Array.isArray(raw)) return null;
+	const out: Array<{ day: string; hours: string }> = [];
+	for (const entry of raw) {
+		const day = dig(entry, 0, 0);
+		const hours = dig(entry, 3, 0, 0);
+		if (day && hours) out.push({ day, hours });
+	}
+	return out.length > 0 ? out : null;
+}
+
+function extractBookingPlatforms(r: any): Array<{ name: string; url: string }> | null {
+	const raw = dig(r, 75, 0, 0);
+	if (!Array.isArray(raw)) return null;
+	const out: Array<{ name: string; url: string }> = [];
+	for (const platform of raw) {
+		const name = dig(platform, 0);
+		const url  = dig(platform, 2, 0);
+		if (name && url) out.push({ name, url });
+	}
+	return out.length > 0 ? out : null;
+}
+
+// ============================================================
+// RECORD PARSER — indices verified against actual raw record
 // ============================================================
 function parseRecord(r: any, includeRaw: boolean): Place {
 	const place: Place = {
@@ -159,28 +190,35 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 		phone:          extractPhone(r),
 		place_id_cid:   extractPlaceId(r),
 
-		// Extras — exact paths from parser.ts
-		price_level:       dig(r, 4, 2),
-		price_range:       dig(r, 4, 10),
-		thumbnail:         dig(r, 37, 0),
-		photo_count:       dig(r, 37, 8),
-		hours:             dig(r, 34, 1),
-		open_status:       dig(r, 34, 4, 4),
-		permanently_closed: dig(r, 88, 0),
-		claimed:           dig(r, 56, 1, 1),
-		plus_code:         dig(r, 183, 2, 2, 0),
-		timezone:          dig(r, 30),
-		maps_url:          dig(r, 27),
-		place_url:         dig(r, 42),
-		description:       dig(r, 25, 15, 0, 2),
-		menu_link:         dig(r, 38, 0),
-		reservation_links: dig(r, 75),
-		booking_link:      dig(r, 75, 0, 0, 2, 0),
-		service_options:   dig(r, 100, 1),
-		amenities:         dig(r, 101),
-		questions_answers: dig(r, 142),
-		owner_response:    dig(r, 144),
-		main_image_url:    dig(r, 72, 0, 0, 6, 0),
+		// Extras — paths verified against actual raw record
+		price_level:        dig(r, 4, 2),
+		price_range:        dig(r, 4, 10),
+		thumbnail:          dig(r, 37, 0),
+		photo_count:        dig(r, 37, 8),
+		// Hours: r[203][0][3][0][0] = hours string, r[203][0][0][0] = day name
+		hours:              extractHours(r),
+		open_status:        dig(r, 203, 0, 4, 0),   // "Open · Closes 11:30 pm"
+		permanently_closed: dig(r, 88, 0) === 2,     // 2 = permanently closed
+		temporarily_closed: dig(r, 88, 0) === 1,     // 1 = temporarily closed
+		// claimed: owner name present at r[57][1] indicates claimed listing
+		claimed:            dig(r, 57, 1) != null,
+		plus_code:          dig(r, 183, 0, 0, 0),   // first address component
+		state:              dig(r, 183, 3, 1, 4),   // Maharashtra
+		city:               dig(r, 183, 3, 1, 3),   // Nagpur
+		postal_code:        dig(r, 183, 3, 1, 4) != null ? dig(r, 183, 3, 1, 4) : null,
+		country_code:       dig(r, 243),             // "IN"
+		timezone:           dig(r, 30),
+		maps_url:           dig(r, 75, 0, 5, 2, 0), // Google Maps reserve URL (long form)
+		description:        dig(r, 25, 15, 0, 2),
+		menu_link:          dig(r, 38, 0),
+		booking_link:       dig(r, 75, 0, 0, 2, 0), // first booking platform URL
+		// Booking platforms array: Swiggy/Zomato/District etc.
+		booking_platforms:  extractBookingPlatforms(r),
+		service_options:    dig(r, 100, 1),
+		questions_answers:  dig(r, 142),
+		owner_response:     dig(r, 144),
+		main_image_url:     dig(r, 72, 0, 0, 6, 0),
+		local_name:         dig(r, 101),             // local language name e.g. Hindi
 	};
 
 	if (includeRaw) place.raw_record = r;
