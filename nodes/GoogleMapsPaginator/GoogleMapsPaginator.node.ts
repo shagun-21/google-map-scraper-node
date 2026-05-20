@@ -40,84 +40,44 @@ interface ProxyConfig {
 	country: string;
 }
 
-interface OpeningHour {
-	day: string;
-	hours: string;
-}
-
-type AdditionalInfoSection = Record<string, boolean>[];
-type AdditionalInfo = Record<string, AdditionalInfoSection>;
-
 interface Place {
-	title: string | null;
-	subTitle: string | null;
-	description: string | null;
-	categoryName: string | null;
-	categories: string[] | null;
-	placeId: string | null;
+	// Core
 	fid: string | null;
-	cid: string | null;
-	kgmid: string | null;
-
-	phone: string | null;
-	phoneUnformatted: string | null;
-	address: string | null;
-	neighborhood: string | null;
-	street: string | null;
-	city: string | null;
-	postalCode: string | null;
-	state: string | null;
-	countryCode: string | null;
-	plusCode: string | null;
-	locatedIn: string | null;
-	floor: string | null;
-
-	location: { lat: number | null; lng: number | null };
-
-	totalScore: number | null;
-	reviewsCount: number | null;
-	reviewsTags: string[];
-
-	imageUrl: string | null;
-	imagesCount: number | null;
-	imageCategories: string[];
-
-	price: string | null;
-
-	permanentlyClosed: boolean;
-	temporarilyClosed: boolean;
-	claimThisBusiness: boolean;
-
-	url: string | null;
+	name: string | null;
+	full_address: string | null;
+	locality: string | null;
+	latitude: number | null;
+	longitude: number | null;
+	rating: number | null;
+	review_count: number | null;
+	categories: string[] | null;
 	website: string | null;
 	website_domain: string | null;
-	menu: string | null;
-	servicesLink: string | null;
-	reserveTableUrl: string | null;
-	googleFoodUrl: string | null;
-	searchPageUrl: string | null;
-	searchString: string | null;
+	phone: string | null;
+	place_id_cid: string | null;
 
-	openingHours: OpeningHour[];
-
-	additionalInfo: AdditionalInfo;
-	popularTimesLiveText: string | null;
-	popularTimesLivePercent: number | null;
-	popularTimesHistogram: Record<string, unknown>;
-	peopleAlsoSearch: string[];
-	placesTags: string[];
-
-	hotelStars: number | null;
-	hotelDescription: string | null;
-	checkInDate: string | null;
-	checkOutDate: string | null;
-	hotelAds: unknown[];
-	gasPrices: unknown[];
-
-	rank: number | null;
-	isAdvertisement: boolean;
-	language: string | null;
-	scrapedAt: string;
+	// Extras (from FIELD_EXTRACTORS in parser.ts)
+	price_level: any;
+	price_range: any;
+	thumbnail: any;
+	photo_count: any;
+	hours: any;
+	open_status: any;
+	permanently_closed: any;
+	claimed: any;
+	plus_code: any;
+	timezone: any;
+	maps_url: any;
+	place_url: any;
+	description: any;
+	menu_link: any;
+	reservation_links: any;
+	booking_link: any;
+	service_options: any;
+	amenities: any;
+	questions_answers: any;
+	owner_response: any;
+	main_image_url: any;
 
 	raw_record?: any;
 }
@@ -175,226 +135,52 @@ function extractPlaceId(r: any): string | null {
 	return m ? m[1] : null;
 }
 
-function extractCid(r: any): string | null {
-	const direct = dig(r, 78);
-	if (direct && typeof direct === 'string' && /^\d+$/.test(direct)) return direct;
-	const fid: string | null = dig(r, 10);
-	if (fid && typeof fid === 'string') {
-		const match = fid.match(/0x([0-9a-f]+)$/i);
-		if (match) {
-			try {
-				return BigInt('0x' + match[1]).toString(10);
-			} catch {
-				// ignore
-			}
-		}
-	}
-	return null;
-}
-
-function extractKgmid(r: any): string | null {
-	const s = JSON.stringify(r);
-	const m = s.match('"(/g/[A-Za-z0-9_]+)"');
-	return m ? m[1] : null;
-}
-
-function extractPrice(r: any): string | null {
-	return dig(r, 4, 2) ?? null;
-}
-
-function extractClosedFlags(r: any): { permanentlyClosed: boolean; temporarilyClosed: boolean } {
-	const code = dig(r, 88, 0);
-	if (code === 2) return { permanentlyClosed: true, temporarilyClosed: false };
-	if (code === 1) return { permanentlyClosed: false, temporarilyClosed: true };
-	const s = JSON.stringify(r);
-	const permClosed = s.includes('"Permanently closed"') || s.includes('"permanently_closed":true');
-	const tempClosed = s.includes('"Temporarily closed"') || s.includes('"temporarily_closed":true');
-	return { permanentlyClosed: permClosed, temporarilyClosed: tempClosed };
-}
-
-function extractOpeningHours(r: any): OpeningHour[] {
-	const raw: any[] = dig(r, 34, 1) ?? [];
-	if (!Array.isArray(raw)) return [];
-	const out: OpeningHour[] = [];
-	for (const entry of raw) {
-		const inner = Array.isArray(entry) ? entry[1] : null;
-		if (!Array.isArray(inner)) continue;
-		const day: string = inner[0] ?? null;
-		const hours: string = inner[1] ?? null;
-		if (day && hours) out.push({ day, hours });
-	}
-	return out;
-}
-
-function extractReserveTableUrl(r: any): string | null {
-	return dig(r, 75, 0, 5, 0) ?? dig(r, 75, 0, 2, 0) ?? null;
-}
-
-function extractImageUrl(r: any): string | null {
-	return dig(r, 72, 0, 1, 6, 0) ?? dig(r, 72, 0, 3, 0, 0) ?? null;
-}
-
-function extractImagesCount(r: any): number | null {
-	const v = dig(r, 37, 2);
-	return typeof v === 'number' ? v : null;
-}
-
-function extractAdditionalInfo(r: any): AdditionalInfo {
-	const sections: any[] = dig(r, 100, 1) ?? [];
-	if (!Array.isArray(sections)) return {};
-	const out: AdditionalInfo = {};
-	for (const section of sections) {
-		const sectionName: string = section?.[0];
-		const attrs: any[] = section?.[1];
-		if (!sectionName || !Array.isArray(attrs)) continue;
-		out[sectionName] = attrs.map((attr: any) => {
-			const attrName: string = attr?.[0] ?? '';
-			const attrVal: boolean = attr?.[2] === 1 || attr?.[2] === true;
-			return { [attrName]: attrVal };
-		});
-	}
-	return out;
-}
-
-interface AddressParts {
-	address: string | null;
-	neighborhood: string | null;
-	street: string | null;
-	city: string | null;
-	postalCode: string | null;
-	state: string | null;
-	countryCode: string | null;
-	plusCode: string | null;
-}
-
-function extractAddressParts(r: any): AddressParts {
-	const fullAddress: string | null = dig(r, 18) ?? dig(r, 39) ?? null;
-	const components: any[] = dig(r, 183, 1, 1) ?? [];
-
-	let neighborhood: string | null = null;
-	let street: string | null = null;
-	let city: string | null = null;
-	let postalCode: string | null = null;
-	let state: string | null = null;
-	let countryCode: string | null = null;
-	let plusCode: string | null = null;
-
-	for (const comp of components) {
-		if (!Array.isArray(comp)) continue;
-		const value: string = comp[0];
-		const type: string = comp[1] ?? '';
-		switch (type) {
-			case 'neighborhood': neighborhood = value; break;
-			case 'route':        street       = value; break;
-			case 'locality':     city         = value; break;
-			case 'postal_code':  postalCode   = value; break;
-			case 'admin1':       state        = value; break;
-			case 'country':      countryCode  = value; break;
-			case 'plus_code':    plusCode     = value; break;
-		}
-	}
-
-	if (!city) city = dig(r, 14) ?? null;
-	if (!postalCode) postalCode = dig(r, 160, 0) ?? null;
-
-	return { address: fullAddress, neighborhood, street, city, postalCode, state, countryCode, plusCode };
-}
-
-function extractSubTitle(r: any): string | null {
-	return dig(r, 167, 0) ?? null;
-}
-
-function extractLocatedIn(r: any): string | null {
-	return dig(r, 93, 0, 0) ?? null;
-}
-
-function buildUrl(name: string | null, placeId: string | null): string | null {
-	if (!name || !placeId) return null;
-	return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name)}&query_place_id=${placeId}`;
+function extractFullAddress(r: any): string | null {
+	return dig(r, 18) ?? dig(r, 39) ?? null;
 }
 
 // ============================================================
-// MAIN RECORD PARSER
+// RECORD PARSER — indices from parser.ts FIELD_EXTRACTORS
 // ============================================================
-function parseRecord(r: any, includeRaw: boolean, rank: number, scrapedAt: string): Place {
-	const placeId = extractPlaceId(r);
-	const name: string | null = dig(r, 11);
-	const addr = extractAddressParts(r);
-	const { permanentlyClosed, temporarilyClosed } = extractClosedFlags(r);
-
+function parseRecord(r: any, includeRaw: boolean): Place {
 	const place: Place = {
-		title:        name,
-		subTitle:     extractSubTitle(r),
-		description:  dig(r, 32, 1, 1) ?? null,
-		categoryName: (dig(r, 13) as string[] | null)?.[0] ?? null,
-		categories:   dig(r, 13) ?? null,
-		placeId,
-		fid:          dig(r, 10),
-		cid:          extractCid(r),
-		kgmid:        extractKgmid(r),
+		// Typed core fields
+		fid:            dig(r, 10),
+		name:           dig(r, 11),
+		full_address:   extractFullAddress(r),
+		locality:       dig(r, 14),
+		latitude:       dig(r, 9, 2),
+		longitude:      dig(r, 9, 3),
+		rating:         dig(r, 4, 7),
+		review_count:   dig(r, 37, 1),
+		categories:     dig(r, 13),
+		website:        dig(r, 7, 0),
+		website_domain: dig(r, 7, 1),
+		phone:          extractPhone(r),
+		place_id_cid:   extractPlaceId(r),
 
-		phone:            extractPhone(r),
-		phoneUnformatted: extractPhone(r),
-		address:          addr.address,
-		neighborhood:     addr.neighborhood,
-		street:           addr.street,
-		city:             addr.city,
-		postalCode:       addr.postalCode,
-		state:            addr.state,
-		countryCode:      addr.countryCode,
-		plusCode:         addr.plusCode,
-		locatedIn:        extractLocatedIn(r),
-		floor:            dig(r, 171, 0) ?? null,
-
-		location: {
-			lat: dig(r, 9, 2),
-			lng: dig(r, 9, 3),
-		},
-
-		totalScore:   dig(r, 4, 7),
-		reviewsCount: dig(r, 37, 1),
-		reviewsTags:  [],
-
-		imageUrl:        extractImageUrl(r),
-		imagesCount:     extractImagesCount(r),
-		imageCategories: [],
-
-		price: extractPrice(r),
-
-		permanentlyClosed,
-		temporarilyClosed,
-		claimThisBusiness: false,
-
-		url:             buildUrl(name, placeId),
-		website:         dig(r, 7, 0),
-		website_domain:  dig(r, 7, 1),
-		menu:            dig(r, 51, 0) ?? null,
-		servicesLink:    null,
-		reserveTableUrl: extractReserveTableUrl(r),
-		googleFoodUrl:   dig(r, 75, 1, 0) ?? null,
-		searchPageUrl:   null,
-		searchString:    null,
-
-		openingHours: extractOpeningHours(r),
-
-		additionalInfo:          extractAdditionalInfo(r),
-		popularTimesLiveText:    null,
-		popularTimesLivePercent: null,
-		popularTimesHistogram:   {},
-		peopleAlsoSearch:        [],
-		placesTags:              [],
-
-		hotelStars:       dig(r, 52, 0) ?? null,
-		hotelDescription: dig(r, 32, 1, 1) ?? null,
-		checkInDate:      null,
-		checkOutDate:     null,
-		hotelAds:         [],
-		gasPrices:        [],
-
-		rank,
-		isAdvertisement: false,
-		language: 'en',
-		scrapedAt,
+		// Extras — exact paths from parser.ts
+		price_level:       dig(r, 4, 2),
+		price_range:       dig(r, 4, 10),
+		thumbnail:         dig(r, 37, 0),
+		photo_count:       dig(r, 37, 8),
+		hours:             dig(r, 34, 1),
+		open_status:       dig(r, 34, 4, 4),
+		permanently_closed: dig(r, 88, 0),
+		claimed:           dig(r, 56, 1, 1),
+		plus_code:         dig(r, 183, 2, 2, 0),
+		timezone:          dig(r, 30),
+		maps_url:          dig(r, 27),
+		place_url:         dig(r, 42),
+		description:       dig(r, 25, 15, 0, 2),
+		menu_link:         dig(r, 38, 0),
+		reservation_links: dig(r, 75),
+		booking_link:      dig(r, 75, 0, 0, 2, 0),
+		service_options:   dig(r, 100, 1),
+		amenities:         dig(r, 101),
+		questions_answers: dig(r, 142),
+		owner_response:    dig(r, 144),
+		main_image_url:    dig(r, 72, 0, 0, 6, 0),
 	};
 
 	if (includeRaw) place.raw_record = r;
@@ -405,17 +191,15 @@ function parseRecord(r: any, includeRaw: boolean, rank: number, scrapedAt: strin
 // RESPONSE PARSER
 // ============================================================
 function parseResponse(text: string, includeRaw: boolean): Place[] {
-	const scrapedAt = new Date().toISOString();
 	try {
 		const data = JSON.parse(stripXSSI(text));
 		const containers: any[] = dig(data, 64) ?? [];
 		const out: Place[] = [];
-		let rank = 1;
 		for (const c of containers) {
 			const r = c?.[1];
 			if (!Array.isArray(r) || r.length < 100) continue;
-			const p = parseRecord(r, includeRaw, rank++, scrapedAt);
-			if (p.fid && p.title) out.push(p);
+			const p = parseRecord(r, includeRaw);
+			if (p.fid && p.name) out.push(p);
 		}
 		return out;
 	} catch {
@@ -491,7 +275,7 @@ async function paginate(
 
 		let pageUrl = baseUrl;
 		if (offset > 0) {
-			// CRITICAL: use URL-encoded form (%21 = !) to match actual baseUrl format
+			// CRITICAL: URL-encoded form (%21 = !) to match actual baseUrl
 			pageUrl = baseUrl.replace('%217i20%2110b1', `%217i20%218i${offset}%2110b1`);
 			if (pageUrl === baseUrl) {
 				stopReason = 'pagination_param_not_found';
