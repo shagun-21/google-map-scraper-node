@@ -81,7 +81,7 @@ interface Place {
 	street_view: string | null;
 
 	// Hours
-	hours: Array<{ day: string; hours: string }> | null;
+	hours: Record<string, string[]> | null;
 	hours_csv: string | null;
 	open_status: string | null;
 
@@ -175,40 +175,34 @@ function extractFullAddress(r: any): string | null {
 	return dig(r, 18) ?? dig(r, 39) ?? null;
 }
 
-// ============================================================
-// HELPERS
-// ============================================================
-
-// Phone — r[178] is more reliable than regex
+// Phone — r[178][1][0][1] = international format, fallback to regex
 function extractPhoneStructured(r: any): string | null {
-	// r[178][1][0][1] = "+91 98343 92140" international format
 	const intl = dig(r, 178, 1, 0, 1);
 	if (intl && typeof intl === 'string') return intl.trim();
-	// fallback regex
 	return extractPhone(r);
 }
 
-// Hours — r[203] array, each entry is one day
-// entry[0][0] = day name, entry[3][0][0] = hours string
-function extractHours(r: any): Array<{ day: string; hours: string }> | null {
-	const raw = dig(r, 203);
+// Hours — r[203] is array of 7 wrappers, each wrapper[0] is the day entry
+// entry[0] = "Wednesday", entry[3][0][0] = "12 pm–12 am"
+// Returns Outscraper-style: { "Wednesday": ["12 pm–12 am"], ... }
+function extractHours(r: any): Record<string, string[]> | null {
+	const raw = r[203];
 	if (!Array.isArray(raw)) return null;
-	const seen = new Set<string>();
-	const out: Array<{ day: string; hours: string }> = [];
-	for (const entry of raw) {
-		const day   = dig(entry, 0, 0);
-		const hours = dig(entry, 3, 0, 0);
-		if (day && hours && !seen.has(day)) {
-			seen.add(day);
-			out.push({ day, hours });
+	const result: Record<string, string[]> = {};
+	for (const wrapper of raw) {
+		if (!Array.isArray(wrapper)) continue;
+		const entry = wrapper[0];
+		if (!Array.isArray(entry)) continue;
+		const day   = entry[0];
+		const hours = entry[3]?.[0]?.[0];
+		if (typeof day === 'string' && typeof hours === 'string' && !result[day]) {
+			result[day] = [hours];
 		}
 	}
-	return out.length > 0 ? out : null;
+	return Object.keys(result).length > 0 ? result : null;
 }
 
 // About/attributes — r[100][1]
-// section[0] = internal key, section[1] = display name, section[2] = attrs
-// attr[0] = internal path, attr[1] = display name, attr[2][0] = 1 if true
 function extractAbout(r: any): Record<string, Record<string, boolean>> | null {
 	const sections: any[] = dig(r, 100, 1) ?? [];
 	if (!Array.isArray(sections) || sections.length === 0) return null;
@@ -303,7 +297,14 @@ function buildReviewsLink(placeId: string | null): string | null {
 	return `https://search.google.com/local/reviews?placeid=${placeId}&authuser=0&hl=en&gl=IN`;
 }
 
-// Reviews per score — r[88][4] has score buckets (5,4,3,2,1 order)
+// Maps URL — built from fid
+function buildMapsUrl(name: string | null, fid: string | null): string | null {
+	if (!fid) return null;
+	if (name) return `https://www.google.com/maps/search/${encodeURIComponent(name)}/@0,0,14z/data=!4m2!3m1!1s${fid}`;
+	return `https://www.google.com/maps/place/?q=place_id:${fid}`;
+}
+
+// Reviews per score — r[88][4] buckets: 5,4,3,2,1 star order
 function extractReviewsPerScore(r: any): Record<string, number> | null {
 	const bucket = dig(r, 88, 4);
 	if (Array.isArray(bucket) && bucket.length >= 5) {
@@ -319,7 +320,7 @@ function extractReviewsPerScore(r: any): Record<string, number> | null {
 }
 
 // ============================================================
-// RECORD PARSER — all fields from verified raw record
+// RECORD PARSER
 // ============================================================
 function parseRecord(r: any, includeRaw: boolean): Place {
 	const fid      = dig(r, 10);
@@ -327,18 +328,23 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 	const placeId  = extractPlaceId(r);
 	const owner    = extractOwner(r);
 	const addr     = extractAddressComponents(r);
-	const hoursArr = extractHours(r);
-	const hoursCsv = hoursArr
-		? hoursArr.map(h => `${h.day},${h.hours}`).join('|')
+	const hoursObj = extractHours(r);
+
+	// hours_csv: "Wednesday,12 pm–12 am|Thursday,12 pm–12 am|..."
+	const hoursCsv = hoursObj
+		? Object.entries(hoursObj).map(([d, h]) => `${d},${h[0]}`).join('|')
 		: null;
+
+	// open_status — r[203][1][4][0]: "Open · Closes 12 am"
+	const openStatus = r[203]?.[1]?.[4]?.[0] ?? null;
 
 	const place: Place = {
 		// ── Core identity ──────────────────────────────────────
 		fid,
 		name,
-		place_id_cid:   placeId,                    // ChIJ...
-		kgmid:          dig(r, 89),                 // /g/11xxx
-		cid:            dig(r, 227, 5) ?? dig(r, 227, 6), // numeric CID
+		place_id_cid:   placeId,
+		kgmid:          dig(r, 89),
+		cid:            dig(r, 227, 5) ?? dig(r, 227, 6),
 
 		// ── Contact ────────────────────────────────────────────
 		phone:          extractPhoneStructured(r),
@@ -379,9 +385,9 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 		street_view:    dig(r, 72, 0, 0, 6, 0),
 
 		// ── Hours ──────────────────────────────────────────────
-		hours:       hoursArr,
+		hours:       hoursObj,
 		hours_csv:   hoursCsv,
-		open_status: dig(r, 203, 0, 4, 0),         // "Open · Closes 11:30 pm"
+		open_status: openStatus,
 
 		// ── Status ─────────────────────────────────────────────
 		permanently_closed: dig(r, 88, 0) === 2,
@@ -397,28 +403,22 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 
 		// ── Links ──────────────────────────────────────────────
 		location_link:     buildLocationLink(name, fid),
+		maps_url:          buildMapsUrl(name, fid),
+		reviews_link:      buildReviewsLink(placeId),
 		menu_link:         dig(r, 38, 0),
-		booking_link:      dig(r, 75, 0, 0, 2, 0), // first booking URL
+		booking_link:      dig(r, 75, 0, 0, 2, 0),
 		booking_platforms: extractBookingPlatforms(r),
-		order_links:       extractOrderLinks(r),    // Swiggy/Zomato order URLs
+		order_links:       extractOrderLinks(r),
 
 		// ── Rich attributes ────────────────────────────────────
-		// Includes: Service options, Dining options, Amenities,
-		// Payments, Atmosphere, Highlights, Accessibility, etc.
 		about:          extractAbout(r),
 		description:    dig(r, 25, 15, 0, 2),
-
-		// ── Business identity badges ───────────────────────────
-		// e.g. "LGBTQ+ friendly", "Identifies as women-owned"
 		badges:         extractBadges(r),
-
-		// ── Local language name ────────────────────────────────
 		local_name:     dig(r, 101),
 
 		// ── Misc ───────────────────────────────────────────────
 		questions_answers: dig(r, 142),
 		owner_response:    dig(r, 144),
-		maps_url:          null,
 	};
 
 	if (includeRaw) place.raw_record = r;
@@ -513,7 +513,6 @@ async function paginate(
 
 		let pageUrl = baseUrl;
 		if (offset > 0) {
-			// CRITICAL: URL-encoded form (%21 = !) to match actual baseUrl
 			pageUrl = baseUrl.replace('%217i20%2110b1', `%217i20%218i${offset}%2110b1`);
 			if (pageUrl === baseUrl) {
 				stopReason = 'pagination_param_not_found';
