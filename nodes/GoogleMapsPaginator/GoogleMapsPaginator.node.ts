@@ -267,7 +267,27 @@ function extractOwner(r: any): { id: string | null; title: string | null } {
 	};
 }
 
-// Address decomposition — r[183][3][1]
+// // Address decomposition — r[183][3][1]
+// function extractAddressComponents(r: any): {
+// 	street: string | null;
+// 	city: string | null;
+// 	state: string | null;
+// 	postal_code: string | null;
+// 	country_code: string | null;
+// } {
+// 	const comp = dig(r, 183, 3, 1);
+// 	return {
+// 		street:       Array.isArray(comp) ? (comp[1] ?? null) : null,
+// 		city:         Array.isArray(comp) ? (comp[3] ?? null) : null,
+// 		state:        Array.isArray(comp) ? (comp[5] ?? null) : null,
+// 		postal_code:  Array.isArray(comp) ? (comp[4] ?? null) : null,
+// 		country_code: Array.isArray(comp) ? (comp[6] ?? null) : null,
+// 	};
+// }
+
+// Address decomposition
+// r[82] = ["locality","street","street","city"] — street + city always present
+// r[2] last element = "City, State PIN" — state + postal
 function extractAddressComponents(r: any): {
 	street: string | null;
 	city: string | null;
@@ -275,14 +295,30 @@ function extractAddressComponents(r: any): {
 	postal_code: string | null;
 	country_code: string | null;
 } {
+	const r82: any[] = r[82] ?? [];
+	const r2: any[]  = r[2]  ?? [];
+
+	const street = r82[1] ?? null;
+	const city   = r82[3] ?? null;
+
+	const lastPart: string = (Array.isArray(r2) ? r2[r2.length - 1] : null) ?? '';
+	let state: string | null = null;
+	let postal: string | null = null;
+	if (typeof lastPart === 'string' && lastPart.length > 0) {
+		const postalMatch = lastPart.match(/\b(\d{6})\b/);
+		postal = postalMatch ? postalMatch[1] : null;
+		const parts = lastPart.split(',');
+		if (parts.length >= 2) {
+			state = parts[1].replace(/\b\d{6}\b/, '').trim() || null;
+		}
+	}
+
 	const comp = dig(r, 183, 3, 1);
-	return {
-		street:       Array.isArray(comp) ? (comp[1] ?? null) : null,
-		city:         Array.isArray(comp) ? (comp[3] ?? null) : null,
-		state:        Array.isArray(comp) ? (comp[5] ?? null) : null,
-		postal_code:  Array.isArray(comp) ? (comp[4] ?? null) : null,
-		country_code: Array.isArray(comp) ? (comp[6] ?? null) : null,
-	};
+	const country_code = dig(r, 243)
+		?? (Array.isArray(comp) ? comp[6] : null)
+		?? null;
+
+	return { street, city, state, postal_code: postal, country_code };
 }
 
 // Location link

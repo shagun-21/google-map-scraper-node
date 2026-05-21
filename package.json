@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-gmaps-paginator-v2",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "n8n community node to paginate Google Maps search results via configurable HTTP proxy",
   "keywords": [
     "n8n-community-node-package",
