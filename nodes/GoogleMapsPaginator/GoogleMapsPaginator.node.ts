@@ -10,9 +10,6 @@ import axios, { AxiosResponse } from 'axios';
 import * as http from 'http';
 import * as https from 'https';
 
-// ============================================================
-// CONSTANTS
-// ============================================================
 const PAGE_SIZE = 20;
 const MAX_OFFSET = 400;
 const MIN_RESPONSE_SIZE = 10000;
@@ -20,7 +17,7 @@ const DEFAULT_DELAY_MS = 1500;
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_RESULTS = 240;
 
-const COOKIES =
+const DEFAULT_COOKIES =
 	'CONSENT=YES+cb.20210720-07-p0.en+FX+410; SOCS=CAESHAgBEhJnd3NfMjAyMzA1MTYtMF9SQzIaAmVuIAEaBgiAjYWkBg';
 
 const USER_AGENTS = [
@@ -29,7 +26,6 @@ const USER_AGENTS = [
 	'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
 ];
 
-// Indian state name → ISO 3166-2:IN code lookup
 const STATE_CODES: Record<string, string> = {
 	'Andhra Pradesh':            'AP',
 	'Arunachal Pradesh':         'AR',
@@ -74,19 +70,11 @@ function lookupStateCode(state: string | null): string | null {
 	return STATE_CODES[state.trim()] ?? null;
 }
 
-// Clean Google's internal type enum: "SearchResult.TYPE_INDIAN_RESTAURANT" → "indian restaurant"
 function cleanType(raw: any): string | null {
 	if (typeof raw !== 'string' || raw.length === 0) return null;
-	return raw
-		.replace(/^SearchResult\.TYPE_/, '')
-		.replace(/_/g, ' ')
-		.toLowerCase()
-		.trim() || null;
+	return raw.replace(/^SearchResult\.TYPE_/, '').replace(/_/g, ' ').toLowerCase().trim() || null;
 }
 
-// ============================================================
-// TYPES
-// ============================================================
 interface ProxyConfig {
 	host: string;
 	port: number;
@@ -96,7 +84,6 @@ interface ProxyConfig {
 }
 
 interface Place {
-	// Core
 	fid: string | null;
 	name: string | null;
 	full_address: string | null;
@@ -110,16 +97,12 @@ interface Place {
 	website_domain: string | null;
 	phone: string | null;
 	place_id_cid: string | null;
-
-	// Identity extras
 	kgmid: string | null;
 	cid: string | null;
 	google_id: string | null;
 	type: string | null;
 	subtypes: string[] | null;
 	verified: boolean;
-
-	// Address decomposition
 	street: string | null;
 	city: string | null;
 	state: string | null;
@@ -128,38 +111,26 @@ interface Place {
 	country_code: string | null;
 	plus_code: string | null;
 	timezone: string | null;
-
-	// Pricing
 	price_level: any;
 	price_range: any;
 	range: string | null;
 	prices: any;
-
-	// Images
 	thumbnail: any;
 	photo_count: any;
 	main_image_url: string | null;
 	photo: string | null;
 	logo: string | null;
 	street_view: string | null;
-
-	// Hours
 	hours: Record<string, string[]> | null;
 	hours_csv: string | null;
 	open_status: string | null;
-
-	// Status
 	permanently_closed: boolean;
 	temporarily_closed: boolean;
 	business_status: string;
-
-	// Owner
 	claimed: boolean;
 	owner_id: string | null;
 	owner_title: string | null;
 	owner_link: string | null;
-
-	// Links
 	location_link: string | null;
 	reviews_link: string | null;
 	maps_url: string | null;
@@ -168,18 +139,13 @@ interface Place {
 	booking_link: any;
 	booking_platforms: Array<{ name: string; url: string }> | null;
 	order_links: Array<{ name: string; url: string }> | null;
-
-	// Reviews
 	reviews_per_score: Record<string, number> | null;
-
-	// Rich attributes
 	about: Record<string, Record<string, boolean>> | null;
 	description: string | null;
 	badges: string[];
 	local_name: string | null;
 	questions_answers: any;
 	owner_response: any;
-
 	raw_record?: any;
 }
 
@@ -191,9 +157,6 @@ interface PaginationResult {
 	debugLog: string[];
 }
 
-// ============================================================
-// HELPERS
-// ============================================================
 function generateSessionId(): string {
 	const ts = Date.now().toString(36);
 	const rand = Math.random().toString(36).substring(2, 10);
@@ -231,6 +194,9 @@ function extractPhone(r: any): string | null {
 }
 
 function extractPlaceId(r: any): string | null {
+	// r[78] has place_id directly
+	const direct = dig(r, 78);
+	if (typeof direct === 'string' && direct.startsWith('ChIJ')) return direct;
 	const s = JSON.stringify(r);
 	const m = s.match(/"(ChIJ[A-Za-z0-9_-]{20,})"/);
 	return m ? m[1] : null;
@@ -240,69 +206,49 @@ function extractFullAddress(r: any): string | null {
 	return dig(r, 18) ?? dig(r, 39) ?? null;
 }
 
-// Phone — r[178][1][0][1] = international format, fallback to regex
 function extractPhoneStructured(r: any): string | null {
 	const intl = dig(r, 178, 1, 0, 1);
 	if (intl && typeof intl === 'string') return intl.trim();
 	return extractPhone(r);
 }
 
-// Hours — r[203] is array of 7 wrappers, each wrapper[0] is the day entry
-// entry[0] = "Wednesday", entry[3][0][0] = "12 pm–12 am"
-// Returns Outscraper-style: { "Wednesday": ["12 pm–12 am"], ... }
+// Hours — with real cookie r[203][0] is the 7-day array
+// Each entry: [day_name, day_num, date, [[hours_string]], 0, 1]
+// Fallback: r[203] elements are direct day entries (fake/truncated cookie)
 function extractHours(r: any): Record<string, string[]> | null {
-	const raw = r[203];
-	if (!Array.isArray(raw)) return null;
+	const raw203 = r[203];
+	if (!Array.isArray(raw203)) return null;
+
 	const result: Record<string, string[]> = {};
-	for (const wrapper of raw) {
+
+	// Try r[203][0] as the 7-day array (real cookie response)
+	const sevenDayArray = raw203[0];
+	if (Array.isArray(sevenDayArray) && Array.isArray(sevenDayArray[0])) {
+		for (const entry of sevenDayArray) {
+			if (!Array.isArray(entry)) continue;
+			const day   = entry[0];
+			const hours = entry[3]?.[0]?.[0];
+			if (typeof day === 'string' && typeof hours === 'string' && !result[day]) {
+				result[day] = [hours];
+			}
+		}
+		if (Object.keys(result).length > 0) return result;
+	}
+
+	// Fallback: r[203] direct entries (truncated/fake cookie response)
+	for (const wrapper of raw203) {
 		if (!Array.isArray(wrapper)) continue;
-		const entry = wrapper[0];
-		if (!Array.isArray(entry)) continue;
+		const entry = Array.isArray(wrapper[0]) ? wrapper[0] : wrapper;
 		const day   = entry[0];
 		const hours = entry[3]?.[0]?.[0];
 		if (typeof day === 'string' && typeof hours === 'string' && !result[day]) {
 			result[day] = [hours];
 		}
 	}
+
 	return Object.keys(result).length > 0 ? result : null;
 }
 
-
-// function extractHours(r: any): Record<string, string[]> | null {
-// 	// Try r[203] first
-// 	const raw = r[203];
-// 	if (Array.isArray(raw)) {
-// 		const result: Record<string, string[]> = {};
-// 		for (const wrapper of raw) {
-// 			if (!Array.isArray(wrapper)) continue;
-// 			const entry = wrapper[0];
-// 			if (!Array.isArray(entry)) continue;
-// 			const day   = entry[0];
-// 			const hours = entry[3]?.[0]?.[0];
-// 			if (typeof day === 'string' && typeof hours === 'string' && !result[day]) {
-// 				result[day] = [hours];
-// 			}
-// 		}
-// 		if (Object.keys(result).length > 0) return result;
-// 	}
-// 	// Fallback: r[118] session-based hours (first session only)
-// 	const sessions = r[118];
-// 	if (!Array.isArray(sessions)) return null;
-// 	const result: Record<string, string[]> = {};
-// 	const days = sessions[0]?.[3]?.[0];
-// 	if (!Array.isArray(days)) return null;
-// 	for (const entry of days) {
-// 		if (!Array.isArray(entry)) continue;
-// 		const day   = entry[0];
-// 		const hours = entry[3]?.[0]?.[0];
-// 		if (typeof day === 'string' && typeof hours === 'string' && !result[day]) {
-// 			result[day] = [hours];
-// 		}
-// 	}
-// 	return Object.keys(result).length > 0 ? result : null;
-// }
-
-// About/attributes — r[100][1]
 function extractAbout(r: any): Record<string, Record<string, boolean>> | null {
 	const sections: any[] = dig(r, 100, 1) ?? [];
 	if (!Array.isArray(sections) || sections.length === 0) return null;
@@ -321,7 +267,6 @@ function extractAbout(r: any): Record<string, Record<string, boolean>> | null {
 	return Object.keys(out).length > 0 ? out : null;
 }
 
-// Badges — r[196][1]: LGBTQ+ friendly, women-owned, etc.
 function extractBadges(r: any): string[] {
 	const items: any[] = dig(r, 196, 1) ?? [];
 	if (!Array.isArray(items)) return [];
@@ -333,7 +278,6 @@ function extractBadges(r: any): string[] {
 	return out;
 }
 
-// Order links — r[46]: Swiggy, Zomato, District etc.
 function extractOrderLinks(r: any): Array<{ name: string; url: string }> | null {
 	const raw: any[] = dig(r, 46) ?? [];
 	if (!Array.isArray(raw)) return null;
@@ -346,7 +290,6 @@ function extractOrderLinks(r: any): Array<{ name: string; url: string }> | null 
 	return out.length > 0 ? out : null;
 }
 
-// Booking platforms — r[75][0][0]
 function extractBookingPlatforms(r: any): Array<{ name: string; url: string }> | null {
 	const raw: any[] = dig(r, 75, 0, 0) ?? [];
 	if (!Array.isArray(raw)) return null;
@@ -359,18 +302,6 @@ function extractBookingPlatforms(r: any): Array<{ name: string; url: string }> |
 	return out.length > 0 ? out : null;
 }
 
-// Reservation link — r[75][0][0][i][2][0] across booking platforms; first non-null wins
-function extractReservationLink(r: any): string | null {
-	const raw: any[] = dig(r, 75, 0, 0) ?? [];
-	if (!Array.isArray(raw)) return null;
-	for (const item of raw) {
-		const url = dig(item, 2, 0);
-		if (url && typeof url === 'string') return url;
-	}
-	return null;
-}
-
-// Owner info — r[57]
 function extractOwner(r: any): { id: string | null; title: string | null; link: string | null } {
 	const ownerCid = dig(r, 57, 2);
 	return {
@@ -380,27 +311,6 @@ function extractOwner(r: any): { id: string | null; title: string | null; link: 
 	};
 }
 
-// // Address decomposition — r[183][3][1]
-// function extractAddressComponents(r: any): {
-// 	street: string | null;
-// 	city: string | null;
-// 	state: string | null;
-// 	postal_code: string | null;
-// 	country_code: string | null;
-// } {
-// 	const comp = dig(r, 183, 3, 1);
-// 	return {
-// 		street:       Array.isArray(comp) ? (comp[1] ?? null) : null,
-// 		city:         Array.isArray(comp) ? (comp[3] ?? null) : null,
-// 		state:        Array.isArray(comp) ? (comp[5] ?? null) : null,
-// 		postal_code:  Array.isArray(comp) ? (comp[4] ?? null) : null,
-// 		country_code: Array.isArray(comp) ? (comp[6] ?? null) : null,
-// 	};
-// }
-
-// Address decomposition
-// r[82] = ["locality","street","street","city"] — street + city always present
-// r[2] last element = "City, State PIN" — state + postal
 function extractAddressComponents(r: any): {
 	street: string | null;
 	city: string | null;
@@ -434,26 +344,22 @@ function extractAddressComponents(r: any): {
 	return { street, city, state, postal_code: postal, country_code };
 }
 
-// Location link
 function buildLocationLink(name: string | null, fid: string | null): string | null {
 	if (!name || !fid) return null;
 	return `https://www.google.com/maps/place/${encodeURIComponent(name)}/@0,0,14z/data=!4m5!3m4!1s${fid}!8m2!3d0!4d0`;
 }
 
-// Reviews link
 function buildReviewsLink(placeId: string | null): string | null {
 	if (!placeId) return null;
 	return `https://search.google.com/local/reviews?placeid=${placeId}&authuser=0&hl=en&gl=IN`;
 }
 
-// Maps URL — built from fid
 function buildMapsUrl(name: string | null, fid: string | null): string | null {
 	if (!fid) return null;
 	if (name) return `https://www.google.com/maps/search/${encodeURIComponent(name)}/@0,0,14z/data=!4m2!3m1!1s${fid}`;
 	return `https://www.google.com/maps/place/?q=place_id:${fid}`;
 }
 
-// Reviews per score — r[88][4] buckets: 5,4,3,2,1 star order
 function extractReviewsPerScore(r: any): Record<string, number> | null {
 	const bucket = dig(r, 88, 4);
 	if (Array.isArray(bucket) && bucket.length >= 5) {
@@ -468,9 +374,6 @@ function extractReviewsPerScore(r: any): Record<string, number> | null {
 	return null;
 }
 
-// ============================================================
-// RECORD PARSER
-// ============================================================
 function parseRecord(r: any, includeRaw: boolean): Place {
 	const fid      = dig(r, 10);
 	const name     = dig(r, 11);
@@ -479,16 +382,13 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 	const addr     = extractAddressComponents(r);
 	const hoursObj = extractHours(r);
 
-	// hours_csv: "Wednesday,12 pm–12 am|Thursday,12 pm–12 am|..."
 	const hoursCsv = hoursObj
 		? Object.entries(hoursObj).map(([d, h]) => `${d},${h[0]}`).join('|')
 		: null;
 
-	// open_status — r[203][1][4][0]: "Open · Closes 12 am"
 	const openStatus = r[203]?.[1]?.[4]?.[0] ?? null;
 
 	const place: Place = {
-		// ── Core identity ──────────────────────────────────────
 		fid,
 		name,
 		place_id_cid:   placeId,
@@ -498,13 +398,9 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 		type:           cleanType(dig(r, 88, 1)),
 		subtypes:       dig(r, 13),
 		verified:       dig(r, 61) === true || dig(r, 61) === 1,
-
-		// ── Contact ────────────────────────────────────────────
 		phone:          extractPhoneStructured(r),
 		website:        dig(r, 7, 0),
 		website_domain: dig(r, 7, 1),
-
-		// ── Location ───────────────────────────────────────────
 		latitude:       dig(r, 9, 2),
 		longitude:      dig(r, 9, 3),
 		full_address:   extractFullAddress(r),
@@ -517,49 +413,32 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 		country_code:   addr.country_code ?? dig(r, 243),
 		plus_code:      dig(r, 183, 0, 0, 0),
 		timezone:       dig(r, 30),
-
-		// ── Categories ─────────────────────────────────────────
 		categories:     dig(r, 13),
-
-		// ── Ratings ────────────────────────────────────────────
 		rating:             dig(r, 4, 7),
 		review_count:       dig(r, 37, 1),
 		reviews_per_score:  extractReviewsPerScore(r),
-
-
-		// ── Pricing ────────────────────────────────────────────
 		price_level: dig(r, 4, 2),
 		price_range: dig(r, 4, 10),
 		range:       dig(r, 4, 2),
 		prices:      dig(r, 4, 10),
-
-		// ── Images ─────────────────────────────────────────────
 		main_image_url: dig(r, 72, 0, 0, 6, 0),
 		photo:          dig(r, 72, 0, 0, 6, 0),
 		thumbnail:      dig(r, 37, 0),
 		photo_count:    dig(r, 37, 8),
 		logo:           dig(r, 157),
 		street_view:    dig(r, 72, 0, 0, 6, 0),
-
-		// ── Hours ──────────────────────────────────────────────
 		hours:       hoursObj,
 		hours_csv:   hoursCsv,
 		open_status: openStatus,
-
-		// ── Status ─────────────────────────────────────────────
 		permanently_closed: dig(r, 88, 0) === 2,
 		temporarily_closed: dig(r, 88, 0) === 1,
 		business_status:    dig(r, 88, 0) === 2 ? 'PERMANENTLY_CLOSED'
 		                  : dig(r, 88, 0) === 1 ? 'TEMPORARILY_CLOSED'
 		                  : 'OPERATIONAL',
-
-		// ── Owner / claimed ────────────────────────────────────
 		claimed:     owner.title != null,
 		owner_id:    owner.id,
 		owner_title: owner.title,
 		owner_link:  owner.link,
-
-		// ── Links ──────────────────────────────────────────────
 		location_link:     buildLocationLink(name, fid),
 		maps_url:          buildMapsUrl(name, fid),
 		reviews_link:      buildReviewsLink(placeId),
@@ -568,14 +447,10 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 		booking_link:      dig(r, 75, 0, 0, 2, 0),
 		booking_platforms: extractBookingPlatforms(r),
 		order_links:       extractOrderLinks(r),
-
-		// ── Rich attributes ────────────────────────────────────
 		about:          extractAbout(r),
 		description:    dig(r, 88, 3),
 		badges:         extractBadges(r),
 		local_name:     dig(r, 101),
-
-		// ── Misc ───────────────────────────────────────────────
 		questions_answers: dig(r, 142),
 		owner_response:    dig(r, 144),
 	};
@@ -584,9 +459,6 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 	return place;
 }
 
-// ============================================================
-// RESPONSE PARSER
-// ============================================================
 function parseResponse(text: string, includeRaw: boolean): Place[] {
 	try {
 		const data = JSON.parse(stripXSSI(text));
@@ -604,14 +476,12 @@ function parseResponse(text: string, includeRaw: boolean): Place[] {
 	}
 }
 
-// ============================================================
-// CORE FETCH
-// ============================================================
 async function fetchPage(
 	url: string,
 	proxy: ProxyConfig,
 	sessionId: string,
 	timeoutMs: number,
+	cookieString: string,
 ): Promise<{ text: string; status: number; size: number }> {
 	const httpAgent  = new http.Agent({ keepAlive: false });
 	const httpsAgent = new https.Agent({ keepAlive: false });
@@ -624,7 +494,7 @@ async function fetchPage(
 			accept:            '*/*',
 			'accept-language': 'en-US,en;q=0.9',
 			referer:           'https://www.google.com/maps/',
-			cookie:            COOKIES,
+			cookie:            cookieString,
 		},
 		proxy: {
 			protocol: 'http',
@@ -644,18 +514,16 @@ async function fetchPage(
 	return { text, status: res.status, size: text.length };
 }
 
-// ============================================================
-// PAGINATION LOOP
-// ============================================================
 async function paginate(
-	baseUrl:     string,
-	maxResults:  number,
-	proxy:       ProxyConfig,
-	sessionId:   string,
-	delayMs:     number,
-	timeoutMs:   number,
-	enableDebug: boolean,
-	includeRaw:  boolean,
+	baseUrl:      string,
+	maxResults:   number,
+	proxy:        ProxyConfig,
+	sessionId:    string,
+	delayMs:      number,
+	timeoutMs:    number,
+	enableDebug:  boolean,
+	includeRaw:   boolean,
+	cookieString: string,
 ): Promise<PaginationResult> {
 	const allPlaces = new Map<string, Place>();
 	let lastOffset = 0;
@@ -682,7 +550,7 @@ async function paginate(
 
 		let fetchResult: { text: string; status: number; size: number };
 		try {
-			fetchResult = await fetchPage(pageUrl, proxy, sessionId, timeoutMs);
+			fetchResult = await fetchPage(pageUrl, proxy, sessionId, timeoutMs, cookieString);
 			pagesFetched++;
 			log(`offset=${offset} status=${fetchResult.status} size=${fetchResult.size}`);
 		} catch (err: any) {
@@ -728,9 +596,6 @@ async function paginate(
 	};
 }
 
-// ============================================================
-// NODE DEFINITION
-// ============================================================
 export class GoogleMapsPaginator implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Google Maps Paginator',
@@ -766,19 +631,19 @@ export class GoogleMapsPaginator implements INodeType {
 				],
 				default: 'paginateResults',
 			},
-			{ displayName: 'Base URL',    name: 'baseUrl',    type: 'string', default: '', required: true, description: 'Prefetch URL extracted from Google Maps HTML shell', placeholder: 'https://www.google.com/search?tbm=map&...' },
+			{ displayName: 'Base URL',    name: 'baseUrl',    type: 'string', default: '', required: true, description: 'Prefetch URL extracted from Google Maps HTML shell' },
 			{ displayName: 'Max Results', name: 'maxResults', type: 'number', default: DEFAULT_MAX_RESULTS, description: 'Maximum places to collect per viewport', typeOptions: { minValue: 1, maxValue: 500 } },
 			{ displayName: 'Snapshot ID', name: 'snapshotId', type: 'string', default: '', description: 'Passthrough identifier for the parent job' },
-			{ displayName: 'Cell',        name: 'cell',       type: 'string', default: 'auto', description: 'Passthrough grid cell identifier (e.g. r0c0)' },
-			{ displayName: 'Latitude (passthrough)',  name: 'lat', type: 'string', default: '', description: 'Passthrough latitude, included in output' },
-			{ displayName: 'Longitude (passthrough)', name: 'lng', type: 'string', default: '', description: 'Passthrough longitude, included in output' },
+			{ displayName: 'Cell',        name: 'cell',       type: 'string', default: 'auto', description: 'Passthrough grid cell identifier' },
+			{ displayName: 'Latitude (passthrough)',  name: 'lat', type: 'string', default: '' },
+			{ displayName: 'Longitude (passthrough)', name: 'lng', type: 'string', default: '' },
 			{
 				displayName: 'Proxy Source',
 				name:        'proxySource',
 				type:        'options',
 				options: [
-					{ name: 'Manual Input', value: 'manual',     description: 'Configure proxy in this node' },
-					{ name: 'Credential',   value: 'credential', description: 'Use stored Evomi credential' },
+					{ name: 'Manual Input', value: 'manual' },
+					{ name: 'Credential',   value: 'credential' },
 				],
 				default: 'manual',
 			},
@@ -794,11 +659,19 @@ export class GoogleMapsPaginator implements INodeType {
 				placeholder: 'Add Option',
 				default:     {},
 				options: [
-					{ displayName: 'Delay Between Pages (ms)', name: 'delayMs',         type: 'number',  default: DEFAULT_DELAY_MS,  description: 'Sleep between paginated requests' },
+					{ displayName: 'Delay Between Pages (ms)', name: 'delayMs',         type: 'number',  default: DEFAULT_DELAY_MS },
 					{ displayName: 'Request Timeout (ms)',     name: 'timeoutMs',        type: 'number',  default: DEFAULT_TIMEOUT_MS },
-					{ displayName: 'Custom Session ID',        name: 'customSessionId', type: 'string',  default: '', description: 'Override auto-generated Evomi session ID' },
-					{ displayName: 'Enable Debug Log',         name: 'enableDebug',     type: 'boolean', default: false, description: 'Whether to include per-page debug log in output stats' },
-					{ displayName: 'Include Raw Record',       name: 'includeRaw',      type: 'boolean', default: false, description: 'Whether to attach the raw Google container array as raw_record on each place' },
+					{ displayName: 'Custom Session ID',        name: 'customSessionId', type: 'string',  default: '' },
+					{ displayName: 'Enable Debug Log',         name: 'enableDebug',     type: 'boolean', default: false },
+					{ displayName: 'Include Raw Record',       name: 'includeRaw',      type: 'boolean', default: false, description: 'Attach raw Google container array as raw_record on each place' },
+					{
+						displayName: 'Google Cookie String',
+						name:        'googleCookie',
+						type:        'string',
+						typeOptions: { password: true },
+						default:     '',
+						description: 'Full Google session cookie string for richer data (all 7-day hours). Leave empty to use default consent cookie.',
+					},
 				],
 			},
 		],
@@ -824,7 +697,13 @@ export class GoogleMapsPaginator implements INodeType {
 				customSessionId?: string;
 				enableDebug?: boolean;
 				includeRaw?: boolean;
+				googleCookie?: string;
 			};
+
+			// Use provided cookie or fall back to default consent cookie
+			const cookieString = (advanced.googleCookie && advanced.googleCookie.trim().length > 0)
+				? advanced.googleCookie.trim()
+				: DEFAULT_COOKIES;
 
 			let proxy: ProxyConfig;
 			if (proxySource === 'credential') {
@@ -869,7 +748,7 @@ export class GoogleMapsPaginator implements INodeType {
 			let topLevelError: string | undefined;
 
 			try {
-				result = await paginate(baseUrl, maxResults, proxy, sessionId, delayMs, timeoutMs, enableDebug, includeRaw);
+				result = await paginate(baseUrl, maxResults, proxy, sessionId, delayMs, timeoutMs, enableDebug, includeRaw, cookieString);
 			} catch (err: any) {
 				topLevelError = err?.message || String(err);
 				result = {
