@@ -564,7 +564,7 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 		maps_url:          buildMapsUrl(name, fid),
 		reviews_link:      buildReviewsLink(placeId),
 		menu_link:         dig(r, 38, 0),
-		reservation_link:  extractReservationLink(r),
+		reservation_link:  dig(r, 75, 0, 0, 2, 0),
 		booking_link:      dig(r, 75, 0, 0, 2, 0),
 		booking_platforms: extractBookingPlatforms(r),
 		order_links:       extractOrderLinks(r),
