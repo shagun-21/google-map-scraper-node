@@ -29,6 +29,61 @@ const USER_AGENTS = [
 	'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
 ];
 
+// Indian state name → ISO 3166-2:IN code lookup
+const STATE_CODES: Record<string, string> = {
+	'Andhra Pradesh':            'AP',
+	'Arunachal Pradesh':         'AR',
+	'Assam':                     'AS',
+	'Bihar':                     'BR',
+	'Chhattisgarh':              'CT',
+	'Goa':                       'GA',
+	'Gujarat':                   'GJ',
+	'Haryana':                   'HR',
+	'Himachal Pradesh':          'HP',
+	'Jharkhand':                 'JH',
+	'Karnataka':                 'KA',
+	'Kerala':                    'KL',
+	'Madhya Pradesh':            'MP',
+	'Maharashtra':               'MH',
+	'Manipur':                   'MN',
+	'Meghalaya':                 'ML',
+	'Mizoram':                   'MZ',
+	'Nagaland':                  'NL',
+	'Odisha':                    'OR',
+	'Punjab':                    'PB',
+	'Rajasthan':                 'RJ',
+	'Sikkim':                    'SK',
+	'Tamil Nadu':                'TN',
+	'Telangana':                 'TG',
+	'Tripura':                   'TR',
+	'Uttar Pradesh':             'UP',
+	'Uttarakhand':               'UT',
+	'West Bengal':               'WB',
+	'Andaman and Nicobar Islands':'AN',
+	'Chandigarh':                'CH',
+	'Dadra and Nagar Haveli and Daman and Diu': 'DH',
+	'Delhi':                     'DL',
+	'Jammu and Kashmir':         'JK',
+	'Ladakh':                    'LA',
+	'Lakshadweep':               'LD',
+	'Puducherry':                'PY',
+};
+
+function lookupStateCode(state: string | null): string | null {
+	if (!state) return null;
+	return STATE_CODES[state.trim()] ?? null;
+}
+
+// Clean Google's internal type enum: "SearchResult.TYPE_INDIAN_RESTAURANT" → "indian restaurant"
+function cleanType(raw: any): string | null {
+	if (typeof raw !== 'string' || raw.length === 0) return null;
+	return raw
+		.replace(/^SearchResult\.TYPE_/, '')
+		.replace(/_/g, ' ')
+		.toLowerCase()
+		.trim() || null;
+}
+
 // ============================================================
 // TYPES
 // ============================================================
@@ -59,11 +114,16 @@ interface Place {
 	// Identity extras
 	kgmid: string | null;
 	cid: string | null;
+	google_id: string | null;
+	type: string | null;
+	subtypes: string[] | null;
+	verified: boolean;
 
 	// Address decomposition
 	street: string | null;
 	city: string | null;
 	state: string | null;
+	state_code: string | null;
 	postal_code: string | null;
 	country_code: string | null;
 	plus_code: string | null;
@@ -72,11 +132,14 @@ interface Place {
 	// Pricing
 	price_level: any;
 	price_range: any;
+	range: string | null;
+	prices: any;
 
 	// Images
 	thumbnail: any;
 	photo_count: any;
 	main_image_url: string | null;
+	photo: string | null;
 	logo: string | null;
 	street_view: string | null;
 
@@ -94,12 +157,14 @@ interface Place {
 	claimed: boolean;
 	owner_id: string | null;
 	owner_title: string | null;
+	owner_link: string | null;
 
 	// Links
 	location_link: string | null;
 	reviews_link: string | null;
 	maps_url: string | null;
 	menu_link: any;
+	reservation_link: string | null;
 	booking_link: any;
 	booking_platforms: Array<{ name: string; url: string }> | null;
 	order_links: Array<{ name: string; url: string }> | null;
@@ -202,6 +267,41 @@ function extractHours(r: any): Record<string, string[]> | null {
 	return Object.keys(result).length > 0 ? result : null;
 }
 
+
+// function extractHours(r: any): Record<string, string[]> | null {
+// 	// Try r[203] first
+// 	const raw = r[203];
+// 	if (Array.isArray(raw)) {
+// 		const result: Record<string, string[]> = {};
+// 		for (const wrapper of raw) {
+// 			if (!Array.isArray(wrapper)) continue;
+// 			const entry = wrapper[0];
+// 			if (!Array.isArray(entry)) continue;
+// 			const day   = entry[0];
+// 			const hours = entry[3]?.[0]?.[0];
+// 			if (typeof day === 'string' && typeof hours === 'string' && !result[day]) {
+// 				result[day] = [hours];
+// 			}
+// 		}
+// 		if (Object.keys(result).length > 0) return result;
+// 	}
+// 	// Fallback: r[118] session-based hours (first session only)
+// 	const sessions = r[118];
+// 	if (!Array.isArray(sessions)) return null;
+// 	const result: Record<string, string[]> = {};
+// 	const days = sessions[0]?.[3]?.[0];
+// 	if (!Array.isArray(days)) return null;
+// 	for (const entry of days) {
+// 		if (!Array.isArray(entry)) continue;
+// 		const day   = entry[0];
+// 		const hours = entry[3]?.[0]?.[0];
+// 		if (typeof day === 'string' && typeof hours === 'string' && !result[day]) {
+// 			result[day] = [hours];
+// 		}
+// 	}
+// 	return Object.keys(result).length > 0 ? result : null;
+// }
+
 // About/attributes — r[100][1]
 function extractAbout(r: any): Record<string, Record<string, boolean>> | null {
 	const sections: any[] = dig(r, 100, 1) ?? [];
@@ -259,11 +359,24 @@ function extractBookingPlatforms(r: any): Array<{ name: string; url: string }> |
 	return out.length > 0 ? out : null;
 }
 
+// Reservation link — r[75][0][0][i][2][0] across booking platforms; first non-null wins
+function extractReservationLink(r: any): string | null {
+	const raw: any[] = dig(r, 75, 0, 0) ?? [];
+	if (!Array.isArray(raw)) return null;
+	for (const item of raw) {
+		const url = dig(item, 2, 0);
+		if (url && typeof url === 'string') return url;
+	}
+	return null;
+}
+
 // Owner info — r[57]
-function extractOwner(r: any): { id: string | null; title: string | null } {
+function extractOwner(r: any): { id: string | null; title: string | null; link: string | null } {
+	const ownerCid = dig(r, 57, 2);
 	return {
-		id:    dig(r, 57, 8) ?? dig(r, 57, 2),
+		id:    dig(r, 57, 8) ?? ownerCid,
 		title: dig(r, 57, 1),
+		link:  ownerCid ? `https://www.google.com/maps?cid=${ownerCid}` : null,
 	};
 }
 
@@ -380,7 +493,11 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 		name,
 		place_id_cid:   placeId,
 		kgmid:          dig(r, 89),
-		cid:            dig(r, 227, 5) ?? dig(r, 227, 6),
+		cid:            dig(r, 57, 2) ?? dig(r, 227, 5) ?? dig(r, 227, 6),
+		google_id:      fid,
+		type:           cleanType(dig(r, 88, 1)),
+		subtypes:       dig(r, 13),
+		verified:       dig(r, 61) === true || dig(r, 61) === 1,
 
 		// ── Contact ────────────────────────────────────────────
 		phone:          extractPhoneStructured(r),
@@ -395,6 +512,7 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 		street:         addr.street,
 		city:           addr.city,
 		state:          addr.state,
+		state_code:     lookupStateCode(addr.state),
 		postal_code:    addr.postal_code,
 		country_code:   addr.country_code ?? dig(r, 243),
 		plus_code:      dig(r, 183, 0, 0, 0),
@@ -412,9 +530,12 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 		// ── Pricing ────────────────────────────────────────────
 		price_level: dig(r, 4, 2),
 		price_range: dig(r, 4, 10),
+		range:       dig(r, 4, 2),
+		prices:      dig(r, 4, 10),
 
 		// ── Images ─────────────────────────────────────────────
 		main_image_url: dig(r, 72, 0, 0, 6, 0),
+		photo:          dig(r, 72, 0, 0, 6, 0),
 		thumbnail:      dig(r, 37, 0),
 		photo_count:    dig(r, 37, 8),
 		logo:           dig(r, 157),
@@ -436,19 +557,21 @@ function parseRecord(r: any, includeRaw: boolean): Place {
 		claimed:     owner.title != null,
 		owner_id:    owner.id,
 		owner_title: owner.title,
+		owner_link:  owner.link,
 
 		// ── Links ──────────────────────────────────────────────
 		location_link:     buildLocationLink(name, fid),
 		maps_url:          buildMapsUrl(name, fid),
 		reviews_link:      buildReviewsLink(placeId),
 		menu_link:         dig(r, 38, 0),
+		reservation_link:  extractReservationLink(r),
 		booking_link:      dig(r, 75, 0, 0, 2, 0),
 		booking_platforms: extractBookingPlatforms(r),
 		order_links:       extractOrderLinks(r),
 
 		// ── Rich attributes ────────────────────────────────────
 		about:          extractAbout(r),
-		description:    dig(r, 25, 15, 0, 2),
+		description:    dig(r, 88, 3),
 		badges:         extractBadges(r),
 		local_name:     dig(r, 101),
 
